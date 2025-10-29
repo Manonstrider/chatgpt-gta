@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Mini 3D GTA-like Playground (No Engine)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    html,body { height:100%; margin:0; overflow:hidden; background:#87ceeb; }
+    #info { position: absolute; left:10px; top:10px; color:#fff; font-family:monospace; z-index:10;
+           background: rgba(0,0,0,0.4); padding:8px; border-radius:6px; }
+    #instructions { font-size:13px; }
+    #hud { position: absolute; right:10px; top:10px; color:#fff; font-family:monospace; 
+           background: rgba(0,0,0,0.4); padding:8px; border-radius:6px; text-align:right; }
+    canvas { display:block; }
+  </style>
+</head>
+<body>
+  <div id="info">
+    <div style="font-weight:bold">Mini 3D GTA-like Playground</div>
+    <div id="instructions">
+      Click the screen to lock pointer. WASD to move, mouse to look. E to enter/exit vehicle. Space to handbrake.
+    </div>
+    <div style="margin-top:6px; font-size:12px; opacity:0.9">Made with Three.js (no full game engine)</div>
+  </div>
+  <div id="hud">Speed: <span id="speed">0</span> m/s</div>
+
+  <!-- Three.js from CDN -->
+  <script src="https://unpkg.com/three@0.158.0/build/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.158.0/examples/js/controls/PointerLockControls.js"></script>
+
+  <script>
+  // Minimal 3D playground: player (capsule), a drivable box car, simple city blocks.
+  // Note: physics are simple/approximated (not a physics engine).
+
+  let camera, scene, renderer, controls;
+  let worldObjects = [];
+  let player = {
+    height: 1.7,
+    speed: 0,
+    maxSpeed: 6,
+    turnSpeed: 0.06,
+    velocity: new THREE.Vector3(),
+    onVehicle: false,
+    mesh: null
+  };
+  let vehicle = {
+    mesh: null,
+    velocity: new THREE.Vector3(),
+    forward: 0,
+    steer: 0,
+    maxForward: 12,
+    maxReverse: -4,
+    drag: 0.98
+  };
+
+  const keys = { forward:false, back:false, left:false, right:false, space:false, e:false };
+
+  init();
+  animate();
+
+  function init(){
+    // Renderer
+    renderer = new THREE.WebGLRenderer({ antialias:true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio || 1);
+    document.body.appendChild(renderer.domElement);
+
+    // Scene & camera
+    scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x9cc3e6, 0.0006);
+
+    camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.position.set(0, player.height, 5);
+
+    // Lights
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
+    hemi.position.set(0, 200, 0);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+    dir.position.set(-5, 10, -10);
+    scene.add(dir);
+
+    // Ground (city plane)
+    const groundMat = new THREE.MeshStandardMaterial({ color:0x6b6b6b });
+    const ground = new THREE.Mesh(new THREE.PlaneGeometry(400,400), groundMat);
+    ground.rotation.x = -Math.PI/2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    // Simple sidewalk grid lines (visual)
+    const grid = new THREE.GridHelper(200, 40, 0x222222, 0x444444);
+    grid.position.y = 0.01;
+    scene.add(grid);
+
+    // Player mesh (invisible capsule-ish)
+    const pgeo = new THREE.CylinderGeometry(0.25, 0.35, player.height, 8);
+    const pmat = new THREE.MeshStandardMaterial({ color: 0xddddff, transparent:true, opacity:0.0 });
+    player.mesh = new THREE.Mesh(pgeo, pmat);
+    player.mesh.position.set(0, player.height/2, 0);
+    scene.add(player.mesh);
+
+    // Vehicle (box)
+    const vgeo = new THREE.BoxGeometry(2.4, 0.9, 4);
+    const vmat = new THREE.MeshStandardMaterial({ color: 0xff4444 });
+    vehicle.mesh = new THREE.Mesh(vgeo, vmat);
+    vehicle.mesh.position.set(6, 0.9/2, 0);
+    vehicle.mesh.castShadow = true;
+    scene.add(vehicle.mesh);
+
+    // Simple wheels (visual only)
+    const wheelGeo = new THREE.CylinderGeometry(0.35,0.35,0.3,12);
+    wheelGeo.rotateZ(Math.PI/2);
+    for(let dx of [-0.9,0.9]) for(let dz of [-1.4,1.4]){
+      const w = new THREE.Mesh(wheelGeo, new THREE.MeshStandardMaterial({ color:0x222222 }));
+      w.position.set(dx, 0.35, dz);
+      vehicle.mesh.add(w);
+    }
+
+    // Buildings (simple boxes)
+    const buildingMat = new THREE.MeshStandardMaterial({ color: 0x999999 });
+    for(let i=-3;i<=3;i++){
+      for(let j=-3;j<=3;j++){
+        if(Math.random() < 0.6) {
+          const h = 3 + Math.random()*12;
+          const b = new THREE.Mesh(new THREE.BoxGeometry(6, h, 8), buildingMat);
+          b.position.set(i*24 + (Math.random()*6-3), h/2, j*24 + (Math.random()*6-3));
+          scene.add(b);
+          worldObjects.push(b);
+        }
+      }
+    }
+
+    // Simple traffic boxes
+    for(let i=0;i<12;i++){
+      const c = new THREE.Mesh(new THREE.BoxGeometry(1.6,0.8,3), new THREE.MeshStandardMaterial({ color: Math.random()*0xffffff }));
+      c.position.set((Math.random()-0.5)*120, 0.4, (Math.random()-0.5)*120);
+      scene.add(c);
+      worldObjects.push(c);
+    }
+
+    // Pointer lock controls for camera rotation
+    controls = new THREE.PointerLockControls(camera, document.body);
+    document.body.addEventListener('click', ()=>{ controls.lock(); });
+
+    // move camera relative to player or vehicle
+    controls.addEventListener('lock', ()=>{ /* locked */ });
+    controls.addEventListener('unlock', ()=>{ /* unlocked */ });
+
+    // Event listeners
+    window.addEventListener('resize', onWindowResize);
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('keyup', onKeyUp);
+
+    // Simple ambient audio placeholder - not included to keep portable
+    // Instruction HUD update
+    updateHUD();
+  }
+
+  function onWindowResize(){
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  function onKeyDown(e){
+    if(e.code === 'KeyW') keys.forward = true;
+    if(e.code === 'KeyS') keys.back = true;
+    if(e.code === 'KeyA') keys.left = true;
+    if(e.code === 'KeyD') keys.right = true;
+    if(e.code === 'Space') keys.space = true;
+    if(e.code === 'KeyE') keys.e = true;
+  }
+  function onKeyUp(e){
+    if(e.code === 'KeyW') keys.forward = false;
+    if(e.code === 'KeyS') keys.back = false;
+    if(e.code === 'KeyA') keys.left = false;
+    if(e.code === 'KeyD') keys.right = false;
+    if(e.code === 'Space') keys.space = false;
+    if(e.code === 'KeyE') {
+      // toggle enter/exit vehicle when key released
+      toggleVehicle();
+    }
+  }
+
+  function toggleVehicle(){
+    // simple distance check
+    const dist = player.mesh.position.distanceTo(vehicle.mesh.position);
+    if(!player.onVehicle && dist < 3){
+      player.onVehicle = true;
+      // move player to vehicle
+      player.mesh.visible = false;
+      // camera will follow from behind
+    } else if(player.onVehicle){
+      player.onVehicle = false;
+      player.mesh.visible = true;
+      // place player near vehicle
+      const pos = vehicle.mesh.position.clone();
+      pos.x += Math.sin(vehicle.mesh.rotation.y)*5;
+      pos.z += Math.cos(vehicle.mesh.rotation.y)*5;
+      player.mesh.position.copy(pos);
+    }
+  }
+
+  function animate(){
+    requestAnimationFrame(animate);
+    const dt = Math.min(0.05, 0.016 + (renderer.info.render.frame%60)/1000); // simple dt clamp
+
+    if(player.onVehicle){
+      updateVehicle(dt);
+      // camera follow behind vehicle
+      const offset = new THREE.Vector3(0, 3.2, -8).applyEuler(vehicle.mesh.rotation);
+      camera.position.copy(vehicle.mesh.position.clone().add(offset));
+      camera.lookAt(vehicle.mesh.position.clone().add(new THREE.Vector3(0,1.0,0)));
+    } else {
+      updatePlayer(dt);
+      // camera follow above player
+      const camOffset = new THREE.Vector3(0, 1.6, 3).applyEuler(camera.rotation);
+      camera.position.lerp(new THREE.Vector3(player.mesh.position.x, player.height + 1.2, player.mesh.position.z).add(new THREE.Vector3(0,0,3)), 0.2);
+      // let pointer controls rotate camera when locked
+      if(controls.isLocked){
+        // move camera to player position
+        camera.position.copy(player.mesh.position).add(new THREE.Vector3(0, player.height - 0.3, 0));
+      }
+    }
+
+    // simple world wrapping for fun (keeps you near center)
+    const limit = 190;
+    if(player.mesh.position.length() > limit) player.mesh.position.set(0, player.height/2, 0);
+    if(vehicle.mesh.position.length() > limit) vehicle.mesh.position.set(0, 0.45, 0);
+
+    renderer.render(scene, camera);
+  }
+
+  function updatePlayer(dt){
+    // compute direction from camera controls (forward is camera's forward)
+    let dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    dir.y = 0;
+    dir.normalize();
+
+    let right = new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0), dir).normalize();
+
+    let move = new THREE.Vector3();
+    if(keys.forward) move.add(dir);
+    if(keys.back) move.sub(dir);
+    if(keys.left) move.sub(right);
+    if(keys.right) move.add(right);
+
+    if(move.length() > 0){
+      move.normalize();
+      player.velocity.add(move.multiplyScalar(player.maxSpeed * dt * 4));
+    } else {
+      player.velocity.multiplyScalar(0.9);
+    }
+
+    // clamp speed
+    if(player.velocity.length() > player.maxSpeed) player.velocity.setLength(player.maxSpeed);
+
+    // apply movement
+    player.mesh.position.add(player.velocity.clone().multiplyScalar(dt));
+    // keep player above ground
+    player.mesh.position.y = player.height/2;
+
+    // camera follow
+    if(!controls.isLocked){
+      camera.position.lerp(new THREE.Vector3(player.mesh.position.x, player.height + 1.4, player.mesh.position.z + 3), 0.12);
+      camera.lookAt(player.mesh.position.clone().add(new THREE.Vector3(0,1,0)));
+    } else {
+      // locked — camera controlled by pointer, but position follows player
+      const camPos = camera.position.clone();
+      camPos.copy(player.mesh.position).add(new THREE.Vector3(0, player.height-0.3, 0));
+      camera.position.lerp(camPos, 0.4);
+    }
+  }
+
+  function updateVehicle(dt){
+    // steering & throttle
+    if(keys.forward) vehicle.forward += dt * 8;
+    else if(keys.back) vehicle.forward -= dt * 8;
+    else vehicle.forward *= 0.95;
+
+    if(keys.left) vehicle.steer += dt * 1.8;
+    else if(keys.right) vehicle.steer -= dt * 1.8;
+    else vehicle.steer *= 0.8;
+
+    // clamp
+    vehicle.forward = Math.max(vehicle.maxReverse, Math.min(vehicle.maxForward, vehicle.forward));
+    vehicle.steer = Math.max(-0.6, Math.min(0.6, vehicle.steer));
+
+    // update rotation based on steer and current forward speed
+    const speedFactor = vehicle.forward / vehicle.maxForward;
+    vehicle.mesh.rotation.y += vehicle.steer * 0.02 * speedFactor * dt * 60;
+
+    // move forward
+    const forwardVec = new THREE.Vector3(0,0,1).applyEuler(vehicle.mesh.rotation).normalize();
+    vehicle.velocity.add(forwardVec.multiplyScalar(vehicle.forward * dt * 0.6));
+
+    // simple drag and brakes (space)
+    if(keys.space) vehicle.velocity.multiplyScalar(0.85);
+    else vehicle.velocity.multiplyScalar(vehicle.drag);
+
+    // update position
+    vehicle.mesh.position.add(vehicle.velocity.clone().multiplyScalar(dt));
+
+    // update HUD speed
+    const sp = vehicle.velocity.length();
+    document.getElementById('speed').innerText = sp.toFixed(1);
+
+    // basic collision with buildings/world objects (very simple)
+    worldObjects.forEach(obj => {
+      const d = obj.position.distanceTo(vehicle.mesh.position);
+      const minDist = 2.5 + (obj.geometry.parameters ? Math.max(obj.geometry.parameters.width||0, obj.geometry.parameters.radius||0) : 2);
+      if(d < minDist){
+        // push vehicle out
+        const push = vehicle.mesh.position.clone().sub(obj.position).setY(0).normalize().multiplyScalar(0.6);
+        vehicle.mesh.position.add(push);
+        vehicle.velocity.multiplyScalar(0.5);
+      }
+    });
+  }
+
+  function updateHUD(){
+    // initial speed text
+    document.getElementById('speed').innerText = '0.0';
+  }
+
+  </script>
+</body>
+</html>
